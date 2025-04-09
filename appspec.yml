@@ -1,0 +1,11 @@
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        # Replace <NEW_TASK_DEFINITION_ARN> with your new task definition ARN
+        TaskDefinition: "<NEW_TASK_DEFINITION_ARN>"
+        LoadBalancerInfo:
+          # Replace "my-docker-app" with the actual container name from your task definition if different
+          ContainerName: "my-docker-app"
+          ContainerPort: 80

@@ -1,0 +1,505 @@
+  AWSTemplateFormatVersion: '2010-09-09'
+  Description: >
+    Wild Rydes DevOps Infrastructure as Code (IaC) Template.
+    This template provisions a highly available containerized application on ECS Fargate,
+    an Application Load Balancer, and a complete CI/CD pipeline using CodePipeline,
+    CodeBuild, and CodeDeploy for blue/green deployments, along with CloudWatch alarms.
+
+  Parameters:
+    VpcCIDR:
+      Description: CIDR block for the VPC.
+      Type: String
+      Default: 10.0.0.0/16
+
+    PublicSubnet1CIDR:
+      Description: CIDR block for public subnet 1.
+      Type: String
+      Default: 10.0.1.0/24
+
+    PublicSubnet2CIDR:
+      Description: CIDR block for public subnet 2.
+      Type: String
+      Default: 10.0.2.0/24
+
+    GithubRepoName:
+      Description: Name of the GitHub repository containing the application source and IaC.
+      Type: String
+      Default: "1209-Final"
+
+    GithubRepoOwner:
+      Description: GitHub repository owner.
+      Type: String
+      Default: "nataliamariya"
+
+    GithubBranch:
+      Description: Branch of the GitHub repository.
+      Type: String
+      Default: main
+
+    GitHubOAuthToken:
+      Description: "GitHub OAuth token for accessing the repository"
+      Type: String
+      NoEcho: true
+
+  Resources:
+
+    #############################
+    ## VPC and Networking Setup
+    #############################
+
+    MyVPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: !Ref VpcCIDR
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+        Tags:
+          - Key: Name
+            Value: WildRydesVPC
+
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+          - Key: Name
+            Value: WildRydes-IGW
+
+    VPCGatewayAttachment:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref MyVPC
+        InternetGatewayId: !Ref InternetGateway
+
+    PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MyVPC
+        CidrBlock: !Ref PublicSubnet1CIDR
+        AvailabilityZone: !Select [ 0, !GetAZs '' ]
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: WildRydes-PublicSubnet1
+
+    PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MyVPC
+        CidrBlock: !Ref PublicSubnet2CIDR
+        AvailabilityZone: !Select [ 1, !GetAZs '' ]
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: WildRydes-PublicSubnet2
+
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref MyVPC
+        Tags:
+          - Key: Name
+            Value: WildRydes-PublicRouteTable
+
+    PublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: VPCGatewayAttachment
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+
+    SubnetRouteTableAssociation1:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref PublicRouteTable
+
+    SubnetRouteTableAssociation2:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet2
+        RouteTableId: !Ref PublicRouteTable
+
+    #############################
+    ## ALB and Security Group
+    #############################
+
+    AlbSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Security Group for Application Load Balancer
+        VpcId: !Ref MyVPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+        Tags:
+          - Key: Name
+            Value: WildRydes-ALB-SG
+
+    ALB:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Name: WildRydesALB
+        Scheme: internet-facing
+        Subnets:
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        SecurityGroups:
+          - !Ref AlbSecurityGroup
+        Tags:
+          - Key: Name
+            Value: WildRydesALB
+
+    ALBTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        Name: WildRydesTG
+        Port: 80
+        Protocol: HTTP
+        VpcId: !Ref MyVPC
+        TargetType: ip
+        HealthCheckPath: /
+
+    AlbListener:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      Properties:
+        LoadBalancerArn: !Ref ALB
+        Port: 80
+        Protocol: HTTP
+        DefaultActions:
+          - Type: forward
+            TargetGroupArn: !Ref ALBTargetGroup
+
+    #############################
+    ## ECS Resources
+    #############################
+
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: WildRydesCluster
+
+    TaskExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Path: /
+
+    ECSTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: wildrydes-task
+        Cpu: "256"
+        Memory: "512"
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+        ContainerDefinitions:
+          - Name: wildrydes-container
+            # Update the Image value to point to your container registry image.
+            Image: placeholder/repository:latest
+            PortMappings:
+              - ContainerPort: 80
+            Essential: true
+
+    ECSService:
+      Type: AWS::ECS::Service
+      DependsOn: AlbListener
+      Properties:
+        ServiceName: wildrydes-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref ECSTaskDefinition
+        DesiredCount: 2
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PublicSubnet1
+              - !Ref PublicSubnet2
+            AssignPublicIp: ENABLED
+            SecurityGroups:
+              - !Ref AlbSecurityGroup
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: wildrydes-container
+            ContainerPort: 80
+
+    #############################
+    ## CodeBuild Project for CI/CD
+    #############################
+
+    CodeBuildRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: WildRydes-CodeBuild-Role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - codebuild.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: CodeBuildPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ecs:DescribeServices
+                    - ecs:UpdateService
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - ecr:GetAuthorizationToken
+                    - ecr:BatchCheckLayerAvailability
+                    - ecr:GetDownloadUrlForLayer
+                    - ecr:BatchGetImage
+                  Resource: "*"
+        Path: /
+
+    CodeBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Name: WildRydes-CodeBuild
+        ServiceRole: !GetAtt CodeBuildRole.Arn
+        Artifacts:
+          Type: NO_ARTIFACTS
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:5.0
+          Type: LINUX_CONTAINER
+          PrivilegedMode: true
+        Source:
+          Type: GITHUB
+          Location: !Sub "https://github.com/${GithubRepoOwner}/${GithubRepoName}.git"
+          BuildSpec: |
+            version: 0.2
+            phases:
+              pre_build:
+                commands:
+                  - echo Logging in to Amazon ECR...
+                  - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+              build:
+                commands:
+                  - echo Build started on `date`
+                  - docker build -t wildrydes .
+                  - docker tag wildrydes:latest 123456789012.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/wildrydes:latest
+              post_build:
+                commands:
+                  - echo Build completed on `date`
+            artifacts:
+              files: '**/*'
+        # Note: In your repository, include a buildspec.yml that matches your build process.
+    
+    #############################
+    ## CodeDeploy for ECS Blue/Green Deployment
+    #############################
+
+    CodeDeployApplication:
+      Type: AWS::CodeDeploy::Application
+      Properties:
+        ApplicationName: WildRydesApplication
+        ComputePlatform: ECS
+
+    CodeDeployRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: WildRydes-CodeDeploy-Role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - codedeploy.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: WildRydes-CodeDeployPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - codedeploy:*
+                  Resource: "*"
+        Path: /
+
+    CodeDeployDeploymentGroup:
+      Type: AWS::CodeDeploy::DeploymentGroup
+      Properties:
+        ApplicationName: !Ref CodeDeployApplication
+        DeploymentGroupName: WildRydesDeploymentGroup
+        ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+        DeploymentStyle:
+          DeploymentType: BLUE_GREEN
+          DeploymentOption: WITH_TRAFFIC_CONTROL
+        BlueGreenDeploymentConfiguration:
+          TerminateBlueInstancesOnDeploymentSuccess:
+            Action: TERMINATE
+            TerminationWaitTimeInMinutes: 5
+          DeploymentReadyOption:
+            ActionOnTimeout: CONTINUE_DEPLOYMENT
+            WaitTimeInMinutes: 0
+        LoadBalancerInfo:
+          TargetGroupPairInfoList:
+            - TargetGroups:
+                - !Ref ALBTargetGroup
+              ProdTrafficRoute:
+                ListenerArns:
+                  - !Ref AlbListener
+        ECSServices:
+          - ClusterName: !Ref ECSCluster
+            ServiceName: wildrydes-service
+
+    #############################
+    ## CodePipeline to Tie It All Together
+    #############################
+
+    ArtifactBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !Sub "${AWS::StackName}-codepipeline-artifacts"
+        VersioningConfiguration:
+          Status: Enabled
+
+    CodePipelineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: WildRydes-CodePipeline-Role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codepipeline.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CodePipelinePolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - codebuild:BatchGetBuilds
+                    - codebuild:StartBuild
+                    - codebuild:StopBuild
+                    - codedeploy:CreateDeployment
+                    - codedeploy:GetApplication
+                    - codedeploy:RegisterApplicationRevision
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:PutObject
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub "arn:aws:s3:::${AWS::StackName}-codepipeline-artifacts"
+                    - !Sub "arn:aws:s3:::${AWS::StackName}-codepipeline-artifacts/*"
+
+    CodePipeline:
+      Type: AWS::CodePipeline::Pipeline
+      DependsOn: ArtifactBucket
+      Properties:
+        Name: WildRydes-Pipeline
+        RoleArn: !GetAtt CodePipelineRole.Arn
+        ArtifactStore:
+          Type: S3
+          Location: !Ref ArtifactBucket
+        Stages:
+          - Name: Source
+            Actions:
+              - Name: SourceAction
+                ActionTypeId:
+                  Category: Source
+                  Owner: ThirdParty
+                  Provider: GitHub
+                  Version: 1
+                OutputArtifacts:
+                  - Name: SourceArtifact
+                Configuration:
+                  Owner: !Ref GithubRepoOwner
+                  Repo: !Ref GithubRepoName
+                  Branch: !Ref GithubBranch
+                  OAuthToken: !Ref GitHubOAuthToken
+                RunOrder: 1
+          - Name: Build
+            Actions:
+              - Name: BuildAction
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Provider: CodeBuild
+                  Version: 1
+                InputArtifacts:
+                  - Name: SourceArtifact
+                OutputArtifacts:
+                  - Name: BuildArtifact
+                Configuration:
+                  ProjectName: !Ref CodeBuildProject
+                RunOrder: 1
+          - Name: Deploy
+            Actions:
+              - Name: DeployAction
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CodeDeploy
+                  Version: 1
+                InputArtifacts:
+                  - Name: BuildArtifact
+                Configuration:
+                  ApplicationName: !Ref CodeDeployApplication
+                  DeploymentGroupName: WildRydesDeploymentGroup
+                RunOrder: 1
+
+    #############################
+    ## CloudWatch Alarm for Build Failures
+    #############################
+
+    CodeBuildAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: CodeBuildFailureAlarm
+        AlarmDescription: Alarm when CodeBuild encounters a failed build.
+        Namespace: AWS/CodeBuild
+        MetricName: FailedBuilds
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        Dimensions:
+          - Name: ProjectName
+            Value: !Ref CodeBuildProject
+        AlarmActions: []   # (Add SNS topic ARNs here if desired for notifications.)
+
+  Outputs:
+    VPCId:
+      Description: The VPC ID for the WildRydes environment.
+      Value: !Ref MyVPC
+
+    ALBURL:
+      Description: The DNS name of the Application Load Balancer.
+      Value: !GetAtt ALB.DNSName
+
+    ECSClusterName:
+      Description: The name of the ECS Cluster.
+      Value: !Ref ECSCluster
