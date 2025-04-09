@@ -1,4 +1,4 @@
-  AWSTemplateFormatVersion: '2010-09-09'
+ AWSTemplateFormatVersion: '2010-09-09'
   Description: >
     Wild Rydes DevOps Infrastructure as Code (IaC) Template.
     This template provisions a highly available containerized application on ECS Fargate,
@@ -299,7 +299,7 @@
                 commands:
                   - echo Build started on `date`
                   - docker build -t wildrydes .
-                  - docker tag wildrydes:latest 123456789012.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/wildrydes:latest
+                  - docker tag wildrydes:latest 438465130459.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/wildrydes:latest
               post_build:
                 commands:
                   - echo Build completed on `date`
