@@ -24,7 +24,7 @@
     GithubRepoName:
       Description: Name of the GitHub repository containing the application source and IaC.
       Type: String
-      Default: "1209-Final"
+      Default: "1209-Test2"
 
     GithubRepoOwner:
       Description: GitHub repository owner.
